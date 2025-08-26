@@ -1,6 +1,6 @@
 #!/bin/bash
 # usb-os — identify OS on connected USB sticks (safe, read-only)
-# Simple edition: ASCII separators, minimal color, no emojis.
+# Fancy edition: colors, icons, panels. No extra dependencies.
 set -Eeuo pipefail
 
 usage() {
@@ -9,26 +9,43 @@ Usage: usb-os [-l] [-d /dev/sdX] [--plain]
   -l              List USB disks/partitions only (no probing)
   -d /dev/sdX     Probe a single USB disk (e.g., /dev/sdb)
   -h              Help
-  --plain         Disable colors (same as NO_COLOR=1)
+  --plain         Disable colors & emojis (same as NO_COLOR=1 NO_EMOJI=1)
+Env toggles:
+  NO_COLOR=1      Disable colors
+  NO_EMOJI=1      Disable icons/emojis
 USAGE
 }
 
-# ---------- minimal color ----------
-supports_color() { [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; }
-PLAIN=0; for a in "$@"; do [[ "$a" == "--plain" ]] && PLAIN=1 && break; done
+# ---------- color / icons ----------
+supports_color() { [ -t 1 ] && tput colors >/dev/null 2>&1 && [ "$(tput colors)" -ge 8 ]; }
+PLAIN=0
+for a in "$@"; do [[ "$a" == "--plain" ]] && PLAIN=1 && break; done
 if supports_color && [ -z "${NO_COLOR:-}" ] && [ $PLAIN -eq 0 ]; then
   B=$(tput bold); R=$(tput sgr0)
-  DIM=$(tput setaf 8)  # grey
-  CY=$(tput setaf 6)   # cyan
-  GR=$(tput setaf 2)   # green
-  YL=$(tput setaf 3)   # yellow
+  C0=$(tput setaf 8)   # grey
+  C1=$(tput setaf 6)   # cyan
+  C2=$(tput setaf 2)   # green
+  C3=$(tput setaf 3)   # yellow
+  C4=$(tput setaf 1)   # red
+  C5=$(tput setaf 4)   # blue
 else
-  B=""; R=""; DIM=""; CY=""; GR=""; YL=""
+  B=""; R=""; C0=""; C1=""; C2=""; C3=""; C4=""; C5=""
+fi
+if [ -n "${NO_EMOJI:-}" ] || [ $PLAIN -eq 1 ]; then
+  ICON_USB="USB"; ICON_DISK="DISK"; ICON_OK="ok"; ICON_WARN="!"; ICON_ISO="ISO"; ICON_PI="Pi"; ICON_EFI="EFI"
+else
+  ICON_USB="🔌"; ICON_DISK="💽"; ICON_OK="✓"; ICON_WARN="⚠"; ICON_ISO="🟣"; ICON_PI="🍓"; ICON_EFI="🖥️"
 fi
 
-hr(){ printf "%s\n" "----------------------------------------------------------------"; }
+# ---------- boxes & formatting ----------
+hr()  { printf "${C0}──────────────────────────────────────────────────────────────${R}\n"; }
+top() { printf "${C0}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${R}\n"; }
+mid() { printf "${C0}┠──────────────────────────────────────────────────────────────┨${R}\n"; }
+bot() { printf "${C0}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${R}\n"; }
+row() { printf "${C0}┃${R} %s\n" "$1"; }
+kv()  { printf "%-16s %s\n" "$1" "$2"; }
 
-# ---------- helpers ----------
+# ---------- core helpers ----------
 TMP=""
 cleanup(){ [[ -n "$TMP" ]] && { umount -q "$TMP/.squash" 2>/dev/null || true; umount -q "$TMP/.iso/.squash" 2>/dev/null || true; umount -q "$TMP/.iso" 2>/dev/null || true; umount -q "$TMP" 2>/dev/null || true; rmdir "$TMP" 2>/dev/null || true; }; }
 trap cleanup EXIT
@@ -40,78 +57,70 @@ skip_set_build(){ declare -gA SKIP=(); local src base; for mp in / /boot /boot/f
 
 usb_disks(){ lsblk -nrpo NAME,TRAN,TYPE | awk '$2=="usb" && $3=="disk"{print $1}'; }
 
-fs_of(){ blkid -s TYPE -o value "$1" 2>/dev/null || lsblk -nro FSTYPE "$1" 2>/dev/null; }
-label_decode(){ local s="$1"; [ -n "$s" ] && printf '%b' "$s" | tr -d '\r' || true; }
-lbl_of(){ local L; L="$(blkid -s LABEL -o value "$1" 2>/dev/null || lsblk -nro LABEL "$1" 2>/dev/null)"; label_decode "$L"; }
-size_of(){ lsblk -nro SIZE "$1" 2>/dev/null; }
-type_of(){ lsblk -nro TYPE "$1" 2>/dev/null; }
-
-# ---------- list view ----------
 list_usb() {
-  printf "${B}${CY}usb-os${R}  (list)\n"
+  printf "${B}${C1}%s ${ICON_USB}${R}\n" "USB devices"
   hr
   for d in $(usb_disks); do
     if [[ -n "${SKIP["$d"]+x}" ]]; then
-      printf "%s  %s (host system disk, skipped)%s\n" "$DIM" "$d" "$R"
+      printf "${C0}- %s (skipped host system disk)${R}\n" "$d"
       continue
     fi
-    local size model; size="$(size_of "$d")"; model="$(lsblk -ndo MODEL "$d" 2>/dev/null | sed 's/^ *//;s/ *$//')"
-    printf "%s  %s%s  %s(%s, %s)%s\n" "$B" "$d" "$R" "$DIM" "${model:-unknown}" "${size:-unknown}" "$R"
-    printf "    %-14s %-6s %-5s %-8s %s\n" "NODE" "SIZE" "TYPE" "FS" "LABEL"
-    while read -r part; do
-      [ -b "$part" ] || continue
-      printf "    %-14s %-6s %-5s %-8s %s\n" \
-        "$part" "$(size_of "$part")" "$(type_of "$part")" "$(fs_of "$part")" "$(lbl_of "$part")"
-    done < <(lsblk -nrpo NAME,TYPE "$d" | awk '$2=="part"{print $1}')
-    hr
+    printf "${C5}- %s${R}\n" "$d"
+    lsblk -nrpo NAME,SIZE,TYPE,FSTYPE,LABEL "$d" | awk -v c0="$C0" -v r="$R" '{printf "  %s%-12s%s size=%-7s type=%-5s fs=%-8s label=%s\n", c0,$1,r,$2,$3,$4,$5}'
   done
 }
 
-# ---------- probing ----------
 probe_mount(){
   local m="$1" found=0
-  if [[ -f "$m/etc/os-release" ]]; then . "$m/etc/os-release"; printf "  %sInstalled:%s %s (%s)\n" "$GR" "$R" "$PRETTY_NAME" "${VERSION_CODENAME:-n/a}"; found=1; fi
-  if [[ -f "$m/usr/lib/os-release" && ! -f "$m/etc/os-release" ]]; then . "$m/usr/lib/os-release"; printf "  %sInstalled:%s %s (%s)\n" "$GR" "$R" "$PRETTY_NAME" "${VERSION_CODENAME:-n/a}"; found=1; fi
-  if [[ -f "$m/etc/lsb-release" ]]; then . "$m/etc/lsb-release"; printf "  %sInstalled (lsb):%s %s\n" "$GR" "$R" "${DISTRIB_DESCRIPTION:-$DISTRIB_ID $DISTRIB_RELEASE}"; found=1; fi
-  if [[ -f "$m/etc/issue" ]]; then printf "  %sIssue:%s %s\n" "$GR" "$R" "$(head -1 "$m/etc/issue")"; found=1; fi
+  if [[ -f "$m/etc/os-release" ]]; then . "$m/etc/os-release"; row "$(kv "${B}${C2}${ICON_OK} Installed${R}:" "$PRETTY_NAME (${VERSION_CODENAME:-n/a})")"; found=1; fi
+  if [[ -f "$m/usr/lib/os-release" && ! -f "$m/etc/os-release" ]]; then . "$m/usr/lib/os-release"; row "$(kv "${B}${C2}${ICON_OK} Installed${R}:" "$PRETTY_NAME (${VERSION_CODENAME:-n/a})")"; found=1; fi
+  if [[ -f "$m/etc/lsb-release" ]]; then . "$m/etc/lsb-release"; row "$(kv "${B}${C2}${ICON_OK} Installed (lsb)${R}:" "${DISTRIB_DESCRIPTION:-$DISTRIB_ID $DISTRIB_RELEASE}")"; found=1; fi
+  if [[ -f "$m/etc/issue" ]]; then row "$(kv "${B}${C2}${ICON_OK} Issue${R}:" "$(head -1 "$m/etc/issue")")"; found=1; fi
 
-  [[ -f "$m/.disk/info" ]] && printf "  %sLive ISO:%s %s\n" "$YL" "$R" "$(head -1 "$m/.disk/info")" && found=1
+  [[ -f "$m/.disk/info" ]] && row "$(kv "${B}${C3}${ICON_ISO} Live ISO${R}:" "$(head -1 "$m/.disk/info")")" && found=1
   for s in casper/filesystem.squashfs live/filesystem.squashfs; do
     if [[ -f "$m/$s" ]]; then
       mkdir -p "$m/.squash"
       if mount -o ro,loop "$m/$s" "$m/.squash" 2>/dev/null; then
-        local pn cn
-        pn="$(grep -E '^PRETTY_NAME=' "$m/.squash/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"' )"
-        cn="$(grep -E '^VERSION_CODENAME=' "$m/.squash/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"')"
-        [[ -n "$pn$cn" ]] && printf "    squashfs: %s %s\n" "$pn" "${cn:+($cn)}" && found=1
+        local pn cn; pn="$(grep -E '^PRETTY_NAME=' "$m/.squash/etc/os-release" 2>/dev/null | cut -d= -f2-)"; cn="$(grep -E '^VERSION_CODENAME=' "$m/.squash/etc/os-release" 2>/dev/null | cut -d= -f2-)"
+        [[ -n "$pn$cn" ]] && row "$(kv "       ${B}${C3}squashfs${R}:" "$(printf "%s %s" "$pn" "${cn:+($cn)}")")" && found=1
         umount "$m/.squash" 2>/dev/null || true
       fi
     fi
   done
 
-  [[ -f "$m/config.txt" ]] && printf "  %sBoot:%s Raspberry Pi firmware-style\n" "$GR" "$R" && found=1
-  [[ -f "$m/EFI/BOOT/BOOTx64.EFI" ]] && printf "  %sBoot:%s x86_64 PC-style EFI\n" "$GR" "$R" && found=1
+  [[ -f "$m/config.txt" ]] && row "$(kv "${B}${C2}${ICON_PI} Boot${R}:" "Raspberry Pi firmware-style")" && found=1
+  [[ -d "$m/overlays" ]] && row "$(kv "       overlays:" "present")" && found=1
+  [[ -f "$m/EFI/BOOT/BOOTx64.EFI" ]] && row "$(kv "${B}${C2}${ICON_EFI} Boot${R}:" "x86_64 PC-style EFI")" && found=1
+
+  if [[ -d "$m/ventoy" ]] || ls "$m"/*.iso >/dev/null 2>&1; then
+    row "$(kv "${B}${C3}Ventoy/ISO${R}:" "container detected")"; found=1
+  fi
   return $(( found ? 0 : 1 ))
+}
+
+disk_title() {
+  local d="$1"
+  local size model; size="$(lsblk -nrpo SIZE "$d" | head -n1)"
+  model="$(lsblk -ndo MODEL "$d" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  printf "${B}${C5}%s ${ICON_DISK}${R} %s ${C0}(%s)${R}\n" "$d" "${model:-}" "${size:-unknown}"
 }
 
 probe_disk(){
   local disk="$1" found=0
   local tr ty; read -r tr ty < <(lsblk -nrpo TRAN,TYPE "$disk" | head -n1)
-  [[ "$tr" != "usb" || "$ty" != "disk" ]] && { printf "%s (not a USB disk, skipped)\n" "$disk"; return 0; }
-
+  [[ "$tr" != "usb" || "$ty" != "disk" ]] && { printf "${C0}Skipping %s (not a USB disk)${R}\n" "$disk"; return 0; }
   if [[ -n "${SKIP["$disk"]+x}" ]]; then
-    hr; printf "%s%s%s\n" "$B" "$disk" "$R"; printf "  %sThis appears to be the host system disk. Skipping.%s\n" "$DIM" "$R"; return 0
+    top; row "$(disk_title "$disk")"; mid; row "${C0}This appears to be the host system disk. Skipping.${R}"; bot; return 0
   fi
 
-  hr
-  local size model; size="$(size_of "$disk")"; model="$(lsblk -ndo MODEL "$disk" 2>/dev/null | sed 's/^ *//;s/ *$//')"
-  printf "%s%s%s  %s(%s, %s)%s\n" "$B" "$disk" "$R" "$DIM" "${model:-unknown}" "${size:-unknown}" "$R"
-  printf "  %-14s %-6s %-5s %-8s %s\n" "NODE" "SIZE" "TYPE" "FS" "LABEL"
-  while read -r part; do
-    [ -b "$part" ] || continue
-    printf "  %-14s %-6s %-5s %-8s %s\n" \
-      "$part" "$(size_of "$part")" "$(type_of "$part")" "$(fs_of "$part")" "$(lbl_of "$part")"
-  done < <(lsblk -nrpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}')
+  top
+  row "$(disk_title "$disk")"
+  mid
+  lsblk -nrpo NAME,SIZE,TYPE,FSTYPE,LABEL "$disk" | \
+    awk -v c0="$C0" -v r="$R" -v b="$B" -v c1="$C1" \
+        '{printf "┃ %s%-12s%s  %-5s  %-8s  %-7s  %s\n", c0,$1,r,$3,$4,$2,$5}'
+  mid
 
   mkmt
   while read -r part; do
@@ -128,25 +137,34 @@ probe_disk(){
       umount "$TMP" 2>/dev/null || true
     fi
   fi
-  (( found )) || printf "  %sNo OS info found (data drive or non-standard layout).%s\n" "$DIM" "$R"
+  (( found )) || row "${C0}${ICON_WARN} No OS info found (data drive or non-standard layout).${R}"
+  bot
 }
 
 # ---------- main ----------
 d_arg=""; l_flag=0; args=()
-for arg in "$@"; do case "$arg" in --plain) : ;; *) args+=("$arg");; esac; done; set -- "${args[@]}"
+for arg in "$@"; do
+  case "$arg" in
+    --plain) : ;;
+    *) args+=("$arg");;
+  esac
+done
+set -- "${args[@]}"
+
 while getopts ":d:lh" opt; do
   case "$opt" in
     d) d_arg="$OPTARG" ;; l) l_flag=1 ;; h) usage; exit 0 ;;
     \?) echo "Unknown option: -$OPTARG" >&2; usage; exit 2 ;;
-    :)  echo "Option -$OPTARG requires an argument" >&2; usage; exit 2 ;;
+    :) echo "Option -$OPTARG requires an argument" >&2; usage; exit 2 ;;
   esac
 done
 
 skip_set_build
-printf "${B}${CY}usb-os${R}\n"
+
+# banner
+printf "${B}${C1}%s${R} %s\n" "usb-os" "$ICON_USB"
 hr
 
 if (( l_flag )); then list_usb; exit 0; fi
 if [[ -n "$d_arg" ]]; then probe_disk "$d_arg"; exit 0; fi
 for d in $(usb_disks); do probe_disk "$d"; done
-hr
