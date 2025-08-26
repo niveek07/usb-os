@@ -1,0 +1,114 @@
+#!/bin/bash
+# usb-os — identify OS on connected USB sticks (safe, read-only)
+# - Scans only USB disks, skipping host’s root/boot devices
+# - Detects installed OS (/etc/os-release), live ISOs (.disk/info + squashfs)
+# - Shows Pi vs PC boot hints (config.txt vs EFI/BOOT/BOOTx64.EFI)
+set -Eeuo pipefail
+
+usage() {
+  cat <<USAGE
+Usage: usb-os [-l] [-d /dev/sdX]
+  -l              List USB disks/partitions only (no probing)
+  -d /dev/sdX     Probe a single USB disk (e.g., /dev/sdb)
+  -h              Help
+USAGE
+}
+
+TMP=""
+cleanup(){ [[ -n "$TMP" ]] && { umount -q "$TMP/.squash" 2>/dev/null || true; umount -q "$TMP/.iso/.squash" 2>/dev/null || true; umount -q "$TMP/.iso" 2>/dev/null || true; umount -q "$TMP" 2>/dev/null || true; rmdir "$TMP" 2>/dev/null || true; }; }
+trap cleanup EXIT
+mkmt(){ TMP="$(mktemp -d /mnt/usb_probe.XXXX)"; }
+
+dev_base(){ local d; d="$(readlink -f "$1")"; [[ "$d" =~ ^/dev/ ]] || { echo ""; return; }; echo "${d}" | sed -E 's/p?[0-9]+$//'; }
+
+skip_set_build(){ declare -gA SKIP=(); local src base; for mp in / /boot /boot/firmware; do src="$(findmnt -no SOURCE -T "$mp" 2>/dev/null || true)"; [[ -z "$src" ]] && continue; base="$(dev_base "$src")"; [[ -n "$base" ]] && SKIP["$base"]=1; done; }
+usb_disks(){ lsblk -nrpo NAME,TRAN,TYPE | awk '$2=="usb" && $3=="disk"{print $1}'; }
+
+list_usb(){
+  for d in $(usb_disks); do
+    [[ -n "${SKIP["$d"]+x}" ]] && { echo "==== $d ==== (skipped host system disk)"; continue; }
+    echo "==== $d ===="
+    lsblk -nrpo NAME,SIZE,TYPE,FSTYPE,LABEL "$d" | awk '{printf "  %-12s size=%-7s type=%-5s fs=%-8s label=%s\n",$1,$2,$3,$4,$5}'
+  done
+}
+
+probe_mount(){
+  local m="$1" found=0
+  if [[ -f "$m/etc/os-release" ]]; then . "$m/etc/os-release"; echo "    -> Installed: $PRETTY_NAME (${VERSION_CODENAME:-n/a})"; found=1; fi
+  if [[ -f "$m/usr/lib/os-release" && ! -f "$m/etc/os-release" ]]; then . "$m/usr/lib/os-release"; echo "    -> Installed: $PRETTY_NAME (${VERSION_CODENAME:-n/a})"; found=1; fi
+  if [[ -f "$m/etc/lsb-release" ]]; then . "$m/etc/lsb-release"; echo "    -> Installed (lsb): ${DISTRIB_DESCRIPTION:-$DISTRIB_ID $DISTRIB_RELEASE}"; found=1; fi
+  if [[ -f "$m/etc/issue" ]]; then echo "    -> Issue: $(head -1 "$m/etc/issue")"; found=1; fi
+  [[ -f "$m/.disk/info" ]] && echo "    -> Live ISO: $(head -1 "$m/.disk/info")" && found=1
+  for s in casper/filesystem.squashfs live/filesystem.squashfs; do
+    if [[ -f "$m/$s" ]]; then
+      mkdir -p "$m/.squash"
+      if mount -o ro,loop "$m/$s" "$m/.squash" 2>/dev/null; then
+        grep -E '^(PRETTY_NAME|VERSION_CODENAME)=' "$m/.squash/etc/os-release" 2>/dev/null | sed 's/^/       squashfs: /' && found=1
+        umount "$m/.squash" 2>/dev/null || true
+      fi
+    fi
+  done
+  [[ -f "$m/config.txt" ]] && echo "    -> Raspberry Pi firmware-style boot" && found=1
+  [[ -d "$m/overlays" ]] && echo "    -> Raspberry Pi overlays present" && found=1
+  [[ -f "$m/EFI/BOOT/BOOTx64.EFI" ]] && echo "    -> x86_64 PC-style EFI" && found=1
+  if [[ -d "$m/ventoy" ]] || ls "$m"/*.iso >/dev/null 2>&1; then
+    echo "    -> Ventoy/ISO container"; found=1
+    local iso; iso="$(ls "$m"/*.iso 2>/dev/null | head -n1 || true)"
+    if [[ -n "$iso" ]]; then
+      mkdir -p "$m/.iso"
+      if mount -o ro,loop "$iso" "$m/.iso" 2>/dev/null; then
+        [[ -f "$m/.iso/.disk/info" ]] && echo "       ISO info: $(head -1 "$m/.iso/.disk/info")"
+        for s in casper/filesystem.squashfs live/filesystem.squashfs; do
+          if [[ -f "$m/.iso/$s" ]]; then
+            mkdir -p "$m/.iso/.squash"
+            mount -o ro,loop "$m/.iso/$s" "$m/.iso/.squash" 2>/dev/null && \
+              grep -E '^(PRETTY_NAME|VERSION_CODENAME)=' "$m/.iso/.squash/etc/os-release" 2>/dev/null | sed 's/^/         ISO squashfs: /'
+            umount "$m/.iso/.squash" 2>/dev/null || true
+          fi
+        done
+        [[ -f "$m/.iso/EFI/BOOT/BOOTx64.EFI" ]] && echo "         ISO arch: x86_64 PC"
+        [[ -f "$m/.iso/config.txt" ]] && echo "         ISO arch: Raspberry Pi"
+        umount "$m/.iso" 2>/dev/null || true
+      fi
+    fi
+  fi
+  return $(( found ? 0 : 1 ))
+}
+
+probe_disk(){
+  local disk="$1" found=0
+  local tr ty; read -r tr ty < <(lsblk -nrpo TRAN,TYPE "$disk" | head -n1)
+  [[ "$tr" != "usb" || "$ty" != "disk" ]] && { echo "Skipping $disk (not a USB disk)"; return 0; }
+  [[ -n "${SKIP["$disk"]+x}" ]] && { echo "==== $disk ==== (skipped host system disk)"; return 0; }
+  echo "==== $disk ===="
+  lsblk -nrpo NAME,SIZE,TYPE,FSTYPE,LABEL "$disk" | awk '{printf "  %-12s size=%-7s type=%-5s fs=%-8s label=%s\n",$1,$2,$3,$4,$5}'
+  mkmt
+  while read -r part; do
+    [[ -b "$part" ]] || continue
+    if mount -o ro,nosuid,nodev,noexec "$part" "$TMP" 2>/dev/null; then
+      probe_mount "$TMP" && found=1 || true
+      umount "$TMP" 2>/dev/null || true
+    fi
+  done < <(lsblk -nrpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}')
+  if (( ! found )); then
+    if mount -o ro,nosuid,nodev,noexec "$disk" "$TMP" 2>/dev/null; then
+      probe_mount "$TMP" && found=1 || true
+      umount "$TMP" 2>/dev/null || true
+    fi
+  fi
+  (( found )) || echo "  No OS info found (data drive or non-standard layout)."
+}
+
+d_arg=""; l_flag=0
+while getopts ":d:lh" opt; do
+  case "$opt" in
+    d) d_arg="$OPTARG" ;; l) l_flag=1 ;; h) usage; exit 0 ;;
+    \?) echo "Unknown option: -$OPTARG" >&2; usage; exit 2 ;;
+    :) echo "Option -$OPTARG requires an argument" >&2; usage; exit 2 ;;
+  esac
+done
+
+skip_set_build
+if (( l_flag )); then list_usb; exit 0; fi
+if [[ -n "$d_arg" ]]; then probe_disk "$d_arg"; exit 0; fi
+for d in $(usb_disks); do probe_disk "$d"; done
