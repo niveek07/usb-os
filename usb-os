@@ -162,8 +162,8 @@ done
 skip_set_build
 
 # banner
-printf "${B}${C1}%s${R} %s\n" "                         USB-OS" "$ICON_USB"
-printf "${B}${C2}%s${R} %s\n" "                         AgentK"
+printf "${B}${C1}%s${R} %s\n" "                               USB-OS" "$ICON_USB"
+printf "${B}${C2}%s${R} %s\n" "                               AgentK"
 hr
 
 if (( l_flag )); then list_usb; exit 0; fi
