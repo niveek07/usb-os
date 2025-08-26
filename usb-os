@@ -33,8 +33,10 @@ else
 fi
 if [ -n "${NO_EMOJI:-}" ] || [ $PLAIN -eq 1 ]; then
   ICON_USB="USB"; ICON_DISK="DISK"; ICON_OK="ok"; ICON_WARN="!"; ICON_ISO="ISO"; ICON_PI="Pi"; ICON_EFI="EFI"
+  BOOT_ICON="*"; LIVE_ICON="*"
 else
   ICON_USB="🔌"; ICON_DISK="💽"; ICON_OK="✓"; ICON_WARN="⚠"; ICON_ISO="🟣"; ICON_PI="🍓"; ICON_EFI="🖥️"
+  BOOT_ICON="🟢"; LIVE_ICON="🟡"
 fi
 
 # ---------- boxes & formatting ----------
@@ -77,7 +79,7 @@ probe_mount(){
   if [[ -f "$m/etc/lsb-release" ]]; then . "$m/etc/lsb-release"; row "$(kv "${B}${C2}${ICON_OK} Installed (lsb)${R}:" "${DISTRIB_DESCRIPTION:-$DISTRIB_ID $DISTRIB_RELEASE}")"; found=1; fi
   if [[ -f "$m/etc/issue" ]]; then row "$(kv "${B}${C2}${ICON_OK} Issue${R}:" "$(head -1 "$m/etc/issue")")"; found=1; fi
 
-  [[ -f "$m/.disk/info" ]] && row "$(kv "${B}${C3}${ICON_ISO} Live ISO${R}:" "$(head -1 "$m/.disk/info")")" && found=1
+  [[ -f "$m/.disk/info" ]] && row "$(kv "${LIVE_ICON} Live ISO${R}:" "$(head -1 "$m/.disk/info")")" && found=1
   for s in casper/filesystem.squashfs live/filesystem.squashfs; do
     if [[ -f "$m/$s" ]]; then
       mkdir -p "$m/.squash"
@@ -89,9 +91,9 @@ probe_mount(){
     fi
   done
 
-  [[ -f "$m/config.txt" ]] && row "$(kv "${B}${C2}${ICON_PI} Boot${R}:" "Raspberry Pi firmware-style")" && found=1
-  [[ -d "$m/overlays" ]] && row "$(kv "       overlays:" "present")" && found=1
-  [[ -f "$m/EFI/BOOT/BOOTx64.EFI" ]] && row "$(kv "${B}${C2}${ICON_EFI} Boot${R}:" "x86_64 PC-style EFI")" && found=1
+  [[ -f "$m/config.txt" ]] && row "$(kv "${BOOT_ICON} Boot${R}:" "Raspberry Pi firmware-style")" && found=1
+  [[ -d "$m/overlays" ]] && row "$(kv "       overlays${R}:" "present")" && found=1
+  [[ -f "$m/EFI/BOOT/BOOTx64.EFI" ]] && row "$(kv "${BOOT_ICON} Boot${R}:" "x86_64 PC-style EFI")" && found=1
 
   if [[ -d "$m/ventoy" ]] || ls "$m"/*.iso >/dev/null 2>&1; then
     row "$(kv "${B}${C3}Ventoy/ISO${R}:" "container detected")"; found=1
@@ -141,6 +143,21 @@ probe_disk(){
   bot
 }
 
+# ---------- banner (ASCII, no figlet) ----------
+cols() { tput cols 2>/dev/null || echo 80; }
+center() { local line="${1-}"; local w=$(cols); local pad=0; (( w > ${#line} )) && pad=$(( (w - ${#line}) / 2 )); printf "%*s%s\n" "$pad" "" "$line"; }
+
+print_banner() {
+  # 5-line block “USB-OS” + small “AgentK”
+  center "${C1}${B}  _   _  ____   ____     ___   ____  ${R}"
+  center "${C1}${B} | | | |/ ___| / ___|   / _ \\ / ___| ${R}"
+  center "${C1}${B} | |_| |\\___ \\ \\___ \\  | | | |\\___ \\ ${R}"
+  center "${C1}${B} |  _  | ___) | ___) | | |_| | ___) |${R}"
+  center "${C1}${B} |_| |_|\\____/ |____/   \\___/ |____/ ${R}"
+  center "           ${C2}AgentK${R}"
+  hr
+}
+
 # ---------- main ----------
 d_arg=""; l_flag=0; args=()
 for arg in "$@"; do
@@ -160,10 +177,7 @@ while getopts ":d:lh" opt; do
 done
 
 skip_set_build
-
-# banner
-printf "${B}${C1}%s${R} %s\n" "usb-os" "$ICON_USB"
-hr
+print_banner
 
 if (( l_flag )); then list_usb; exit 0; fi
 if [[ -n "$d_arg" ]]; then probe_disk "$d_arg"; exit 0; fi
