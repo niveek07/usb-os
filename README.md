@@ -1,6 +1,6 @@
 # usb-os
 Check what os is on bootable usb
-Here’s a clean **README.md** you can paste into your repo 👇
+
 
 ---
 
