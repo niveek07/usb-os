@@ -1,7 +1,14 @@
 # usb-os
 
 ```
-                     AgentK
+                               _   _  __
+         /\                   | | | |/ /
+        /  \   __ _  ___ _ __ | |_| ' / 
+       / /\ \ / _` |/ _ \ '_ \| __|  <  
+      / ____ \ (_| |  __/ | | | |_| . \ 
+     /_/    \_\__, |\___|_| |_|\__|_|\_\
+               __/ |                    
+              |___/ 
 ```
 
 Identify what operating system is on a **USB stick** — safely and quickly.
