@@ -1,8 +1,14 @@
 sudo tee /usr/local/bin/usb-os >/dev/null <<'EOF'
 #!/bin/bash
 # usb-os — identify OS on connected USB sticks (safe, read-only)
-# Fancy by default; use --plain to fall back to minimal ASCII.
+# Fancy banner by default; use --plain to disable boxes/colors.
+
 set -Eeuo pipefail
+
+# Ensure UTF-8 even under sudo (so box-drawing works)
+if [ -t 1 ] && ! locale charmap 2>/dev/null | grep -qi 'utf-8'; then
+  export LC_ALL=C.UTF-8 LANG=C.UTF-8
+fi
 
 usage() {
   cat <<USAGE
@@ -10,50 +16,57 @@ Usage: usb-os [-l] [-d /dev/sdX] [--plain] [--no-emoji]
   -l              List USB disks/partitions only (no probing)
   -d /dev/sdX     Probe a single USB disk (e.g., /dev/sdb)
   -h              Help
-  --plain         Disable colors/box UI
+  --plain         Disable colors/Unicode boxes
   --no-emoji      Keep boxes but replace emojis with text
-Env toggles: NO_COLOR=1 disables color; NO_EMOJI=1 disables emojis.
 USAGE
 }
 
 # ---------- flags ----------
-FANCY=1  # fancy by default
-PLAIN=0; NOEMOJI_ENV="${NO_EMOJI:-}"
+FANCY=1   # FORCE fancy by default
+PLAIN=0; NOEMOJI="${NO_EMOJI:-}"
 args=()
 for a in "$@"; do
   case "$a" in
     --plain) PLAIN=1; FANCY=0 ;;
-    --no-emoji) NOEMOJI_ENV=1 ;;
+    --no-emoji) NOEMOJI=1 ;;
     *) args+=("$a") ;;
   esac
 done
 set -- "${args[@]}"
 
-# ---------- color & unicode ----------
-supports_color() { [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; }
-unicode_ok()     { locale charmap 2>/dev/null | grep -qi 'utf-8'; }
-
-if supports_color && [ -z "${NO_COLOR:-}" ] && [ $PLAIN -eq 0 ]; then
-  B=$(tput bold); R=$(tput sgr0)
-  DIM=$(tput setaf 8); CY=$(tput setaf 6); GR=$(tput setaf 2); YL=$(tput setaf 3); RD=$(tput setaf 1); BL=$(tput setaf 4)
+# ---------- color ----------
+supports_color() {
+  [ -t 1 ] || return 1
+  if command -v tput >/dev/null 2>&1; then
+    [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ] || return 1
+  fi
+  [ -z "${NO_COLOR:-}" ]
+}
+if supports_color && [ $PLAIN -eq 0 ]; then
+  if command -v tput >/dev/null 2>&1; then
+    B=$(tput bold); R=$(tput sgr0)
+    DIM=$(tput setaf 8); CY=$(tput setaf 6); GR=$(tput setaf 2); YL=$(tput setaf 3); RD=$(tput setaf 1); BL=$(tput setaf 4)
+  else
+    B=$'\e[1m'; R=$'\e[0m'
+    DIM=$'\e[90m'; CY=$'\e[36m'; GR=$'\e[32m'; YL=$'\e[33m'; RD=$'\e[31m'; BL=$'\e[34m'
+  fi
 else
   B=""; R=""; DIM=""; CY=""; GR=""; YL=""; RD=""; BL=""
+  [ $PLAIN -eq 1 ] && FANCY=0
 fi
 
-if [ $FANCY -eq 1 ] && unicode_ok; then
-  if [ -n "$NOEMOJI_ENV" ]; then
-    ICON_USB="USB"; ICON_DISK="DISK"; ICON_OK="ok"; ICON_WARN="!"; ICON_ISO="ISO"; ICON_PI="Pi"; ICON_EFI="EFI"
-  else
-    ICON_USB="🔌"; ICON_DISK="💽"; ICON_OK="✓"; ICON_WARN="⚠"; ICON_ISO="🟣"; ICON_PI="🍓"; ICON_EFI="🖥️"
-  fi
+# ---------- boxes & icons ----------
+if [ $FANCY -eq 1 ]; then
   L_H='━'; L_TL='┏'; L_TR='┓'; L_BL='┗'; L_BR='┛'; L_V='┃'; L_MH='─'; L_MV='┠'; L_MR='┨'
 else
-  ICON_USB="USB"; ICON_DISK="DISK"; ICON_OK="ok"; ICON_WARN="!"; ICON_ISO="ISO"; ICON_PI="Pi"; ICON_EFI="EFI"
   L_H='-'; L_TL='+'; L_TR='+'; L_BL='+'; L_BR='+'; L_V='|'; L_MH='-'; L_MV='|'; L_MR='|'
-  FANCY=0
+fi
+if [ $FANCY -eq 1 ] && [ -z "$NOEMOJI" ]; then
+  ICON_USB="🔌"; ICON_DISK="💽"; ICON_ISO="🟣"; ICON_PI="🍓"; ICON_EFI="🖥️"
+else
+  ICON_USB="USB"; ICON_DISK="DISK"; ICON_ISO="ISO"; ICON_PI="Pi"; ICON_EFI="EFI"
 fi
 
-# ---------- boxes & helpers ----------
 BOXW=62
 hr()  { printf "%s\n" "$(printf '%*s' "$BOXW" '' | tr ' ' "$L_H")"; }
 top() { [ $FANCY -eq 1 ] && printf "%s\n" "${L_TL}$(printf '%*s' "$BOXW" '' | tr ' ' "$L_H")${L_TR}" || hr; }
@@ -66,7 +79,6 @@ center() {
   printf "%*s%s\n" "$pad" "" "$s"
 }
 
-# ---------- banner (USB-OS big, AgentK small) ----------
 show_banner() {
   if [ $FANCY -eq 1 ]; then
     top
@@ -74,12 +86,11 @@ show_banner() {
     row "$(center "${DIM}AgentK${R}")"
     bot
   else
-    echo "USB-OS - AgentK"
-    hr
+    echo "USB-OS — AgentK"; hr
   fi
 }
 
-# ---------- mount helpers ----------
+# ---------- safe mounts ----------
 TMP=""
 cleanup(){ [[ -n "$TMP" ]] && { umount -q "$TMP/.squash" 2>/dev/null || true; umount -q "$TMP/.iso/.squash" 2>/dev/null || true; umount -q "$TMP/.iso" 2>/dev/null || true; umount -q "$TMP" 2>/dev/null || true; rmdir "$TMP" 2>/dev/null || true; }; }
 trap cleanup EXIT
@@ -89,7 +100,7 @@ dev_base(){ local d; d="$(readlink -f "$1")"; [[ "$d" =~ ^/dev/ ]] || { echo "";
 skip_set_build(){ declare -gA SKIP=(); local src base; for mp in / /boot /boot/firmware; do src="$(findmnt -no SOURCE -T "$mp" 2>/dev/null || true)"; [[ -z "$src" ]] && continue; base="$(dev_base "$src")"; [[ -n "$base" ]] && SKIP["$base"]=1; done; }
 usb_disks(){ lsblk -nrpo NAME,TRAN,TYPE | awk '$2=="usb" && $3=="disk"{print $1}'; }
 
-# ---------- safer metadata ----------
+# metadata helpers
 fs_of(){ blkid -s TYPE -o value "$1" 2>/dev/null || lsblk -nro FSTYPE "$1" 2>/dev/null; }
 label_decode(){ local s="$1"; [ -n "$s" ] && printf '%b' "$s" | tr -d '\r' || true; }
 lbl_of(){ local L; L="$(blkid -s LABEL -o value "$1" 2>/dev/null || lsblk -nro LABEL "$1" 2>/dev/null)"; label_decode "$L"; }
@@ -98,7 +109,7 @@ type_of(){ lsblk -nro TYPE "$1" 2>/dev/null; }
 model_of(){ lsblk -ndo MODEL "$1" 2>/dev/null | sed 's/^ *//;s/ *$//'; }
 sanitize_issue(){ sed -E 's/\\[nrlt]//g; s/\\[0-9]{3}//g; s/[[:space:]]+$//'; }
 
-# ---------- list ----------
+# list
 list_usb() {
   show_banner
   for d in $(usb_disks); do
@@ -119,7 +130,6 @@ list_usb() {
   done
 }
 
-# ---------- probing ----------
 probe_mount(){
   local m="$1" found=0
   if [[ -f "$m/etc/os-release" ]]; then . "$m/etc/os-release"; row "Installed: $PRETTY_NAME (${VERSION_CODENAME:-n/a})"; found=1; fi
